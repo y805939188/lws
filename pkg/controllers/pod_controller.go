@@ -404,14 +404,21 @@ func constructWorkerStatefulSetApplyConfiguration(leaderPod corev1.Pod, lws lead
 		leaderworkerset.SetNameLabelKey:         lws.Name,
 		leaderworkerset.GroupUniqueHashLabelKey: leaderPod.Labels[leaderworkerset.GroupUniqueHashLabelKey],
 	}
-	labelMap := map[string]string{
+	statefulSetLabels := map[string]string{
 		leaderworkerset.GroupIndexLabelKey:      leaderPod.Labels[leaderworkerset.GroupIndexLabelKey],
 		leaderworkerset.SetNameLabelKey:         lws.Name,
 		leaderworkerset.GroupUniqueHashLabelKey: leaderPod.Labels[leaderworkerset.GroupUniqueHashLabelKey],
 		leaderworkerset.RevisionKey:             revisionutils.GetRevisionKey(&leaderPod),
 	}
+	podTemplateLabels := map[string]string{
+		leaderworkerset.GroupIndexLabelKey:      leaderPod.Labels[leaderworkerset.GroupIndexLabelKey],
+		leaderworkerset.SetNameLabelKey:         lws.Name,
+		leaderworkerset.GroupUniqueHashLabelKey: leaderPod.Labels[leaderworkerset.GroupUniqueHashLabelKey],
+		leaderworkerset.RevisionKey:             revisionutils.GetRevisionKey(&leaderPod),
+	}
+	addGangSchedulerProviderPodLabel(podTemplateLabels, lws.Labels)
 
-	podTemplateApplyConfiguration.WithLabels(labelMap)
+	podTemplateApplyConfiguration.WithLabels(podTemplateLabels)
 	podAnnotations := make(map[string]string)
 	podAnnotations[leaderworkerset.SizeAnnotationKey] = strconv.Itoa(int(*lws.Spec.LeaderWorkerTemplate.Size))
 	podAnnotations[leaderworkerset.LeaderPodNameAnnotationKey] = leaderPod.Name
@@ -440,7 +447,7 @@ func constructWorkerStatefulSetApplyConfiguration(leaderPod corev1.Pod, lws lead
 			WithOrdinals(appsapplyv1.StatefulSetOrdinals().WithStart(1)).
 			WithSelector(metaapplyv1.LabelSelector().
 				WithMatchLabels(selectorMap))).
-		WithLabels(labelMap)
+		WithLabels(statefulSetLabels)
 
 	pvcApplyConfiguration := controllerutils.GetPVCApplyConfiguration(&lws)
 	if len(pvcApplyConfiguration) > 0 {

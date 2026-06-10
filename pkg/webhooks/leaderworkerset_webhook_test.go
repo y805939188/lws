@@ -17,11 +17,19 @@ limitations under the License.
 package webhooks
 
 import (
+	"context"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/ptr"
+
+	leaderworkerset "sigs.k8s.io/lws/api/leaderworkerset/v1"
+	"sigs.k8s.io/lws/pkg/schedulerprovider"
 )
 
 func TestGetPercentValue(t *testing.T) {
@@ -182,5 +190,262 @@ func TestIsNotMoreThan100Percent(t *testing.T) {
 				t.Errorf("unexpected result: (-want, +got) %s", diff)
 			}
 		})
+	}
+}
+
+func TestLeaderWorkerSetWebhookValidateCreateGangSchedulerProvider(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*leaderworkerset.LeaderWorkerSet)
+		wantErr bool
+	}{
+		{
+			name: "no opt-in",
+		},
+		{
+			name: "valid koordinator opt-in",
+			mutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Labels = map[string]string{
+					leaderworkerset.GangSchedulerProviderLabelKey: string(schedulerprovider.Koordinator),
+				}
+			},
+		},
+		{
+			name: "unsupported provider value",
+			mutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Labels = map[string]string{
+					leaderworkerset.GangSchedulerProviderLabelKey: "volcano",
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "empty provider value",
+			mutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Labels = map[string]string{
+					leaderworkerset.GangSchedulerProviderLabelKey: "",
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "case sensitive provider value",
+			mutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Labels = map[string]string{
+					leaderworkerset.GangSchedulerProviderLabelKey: "Koordinator",
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "koordinator opt-in with LeaderReady",
+			mutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Labels = map[string]string{
+					leaderworkerset.GangSchedulerProviderLabelKey: string(schedulerprovider.Koordinator),
+				}
+				lws.Spec.StartupPolicy = leaderworkerset.LeaderReadyStartupPolicy
+			},
+			wantErr: true,
+		},
+		{
+			name: "reserved label in leader template",
+			mutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Spec.LeaderWorkerTemplate.LeaderTemplate = &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							leaderworkerset.GangSchedulerProviderLabelKey: string(schedulerprovider.Koordinator),
+						},
+					},
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "reserved label in worker template",
+			mutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels = map[string]string{
+					leaderworkerset.GangSchedulerProviderLabelKey: string(schedulerprovider.Koordinator),
+				}
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			webhook := &LeaderWorkerSetWebhook{}
+			lws := validLeaderWorkerSetForWebhookTest()
+			if tt.mutate != nil {
+				tt.mutate(lws)
+			}
+			require.NoError(t, webhook.Default(context.Background(), lws))
+
+			_, err := webhook.ValidateCreate(context.Background(), lws)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestLeaderWorkerSetWebhookValidateUpdateGangSchedulerProvider(t *testing.T) {
+	tests := []struct {
+		name      string
+		oldMutate func(*leaderworkerset.LeaderWorkerSet)
+		newMutate func(*leaderworkerset.LeaderWorkerSet)
+		wantErr   bool
+	}{
+		{
+			name: "unchanged without opt-in",
+		},
+		{
+			name: "unchanged koordinator opt-in",
+			oldMutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Labels = map[string]string{
+					leaderworkerset.GangSchedulerProviderLabelKey: string(schedulerprovider.Koordinator),
+				}
+			},
+		},
+		{
+			name: "adding opt-in is rejected",
+			newMutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Labels = map[string]string{
+					leaderworkerset.GangSchedulerProviderLabelKey: string(schedulerprovider.Koordinator),
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "removing opt-in is rejected",
+			oldMutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Labels = map[string]string{
+					leaderworkerset.GangSchedulerProviderLabelKey: string(schedulerprovider.Koordinator),
+				}
+			},
+			newMutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				delete(lws.Labels, leaderworkerset.GangSchedulerProviderLabelKey)
+			},
+			wantErr: true,
+		},
+		{
+			name: "changing opt-in is rejected",
+			oldMutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Labels = map[string]string{
+					leaderworkerset.GangSchedulerProviderLabelKey: string(schedulerprovider.Koordinator),
+				}
+			},
+			newMutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Labels[leaderworkerset.GangSchedulerProviderLabelKey] = "volcano"
+			},
+			wantErr: true,
+		},
+		{
+			name: "removing unsupported provider value is allowed for cleanup",
+			oldMutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Labels = map[string]string{
+					leaderworkerset.GangSchedulerProviderLabelKey: "volcano",
+				}
+			},
+			newMutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				delete(lws.Labels, leaderworkerset.GangSchedulerProviderLabelKey)
+			},
+		},
+		{
+			name: "unrelated update with unsupported provider value is rejected",
+			oldMutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Labels = map[string]string{
+					leaderworkerset.GangSchedulerProviderLabelKey: "volcano",
+				}
+			},
+			newMutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Spec.Replicas = ptr.To[int32](2)
+			},
+			wantErr: true,
+		},
+		{
+			name: "reserved label added to worker template is rejected",
+			newMutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels = map[string]string{
+					leaderworkerset.GangSchedulerProviderLabelKey: string(schedulerprovider.Koordinator),
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "reserved label added to leader template is rejected",
+			newMutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Spec.LeaderWorkerTemplate.LeaderTemplate = &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							leaderworkerset.GangSchedulerProviderLabelKey: string(schedulerprovider.Koordinator),
+						},
+					},
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "unrelated update with unchanged opt-in succeeds",
+			oldMutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Labels = map[string]string{
+					leaderworkerset.GangSchedulerProviderLabelKey: string(schedulerprovider.Koordinator),
+				}
+			},
+			newMutate: func(lws *leaderworkerset.LeaderWorkerSet) {
+				lws.Spec.Replicas = ptr.To[int32](2)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			webhook := &LeaderWorkerSetWebhook{}
+			oldLWS := validLeaderWorkerSetForWebhookTest()
+			if tt.oldMutate != nil {
+				tt.oldMutate(oldLWS)
+			}
+			require.NoError(t, webhook.Default(context.Background(), oldLWS))
+
+			newLWS := oldLWS.DeepCopy()
+			if tt.newMutate != nil {
+				tt.newMutate(newLWS)
+			}
+			require.NoError(t, webhook.Default(context.Background(), newLWS))
+
+			_, err := webhook.ValidateUpdate(context.Background(), oldLWS, newLWS)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func validLeaderWorkerSetForWebhookTest() *leaderworkerset.LeaderWorkerSet {
+	return &leaderworkerset.LeaderWorkerSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-lws",
+			Namespace: "default",
+		},
+		Spec: leaderworkerset.LeaderWorkerSetSpec{
+			Replicas:      ptr.To[int32](1),
+			StartupPolicy: leaderworkerset.LeaderCreatedStartupPolicy,
+			LeaderWorkerTemplate: leaderworkerset.LeaderWorkerTemplate{
+				Size: ptr.To[int32](2),
+				WorkerTemplate: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "worker",
+								Image: "busybox",
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 }

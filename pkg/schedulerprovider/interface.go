@@ -28,7 +28,7 @@ import (
 )
 
 var (
-	SupportedSchedulerProviders = sets.New("volcano")
+	SupportedSchedulerProviders = sets.New(string(Volcano), string(Koordinator))
 )
 
 const (
@@ -58,6 +58,8 @@ func NewSchedulerProvider(providerType ProviderType, client client.Client) (Sche
 	switch providerType {
 	case Volcano:
 		return NewVolcanoProvider(client), nil
+	case Koordinator:
+		return NewKoordinatorProvider(), nil
 	default:
 		return nil, fmt.Errorf("unsupported scheduler provider type %s, the supported provider list is %v", providerType, SupportedSchedulerProviders.UnsortedList())
 	}

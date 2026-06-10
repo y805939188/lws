@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	v1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
+	"sigs.k8s.io/lws/pkg/schedulerprovider"
 )
 
 type LeaderWorkerSetWebhook struct{}
@@ -98,6 +99,7 @@ func (r *LeaderWorkerSetWebhook) ValidateCreate(ctx context.Context, lws *v1.Lea
 func (r *LeaderWorkerSetWebhook) ValidateUpdate(ctx context.Context, oldLws, newLws *v1.LeaderWorkerSet) (admission.Warnings, error) {
 	allErrs := r.generalValidate(newLws)
 	specPath := field.NewPath("spec")
+	metadataPath := field.NewPath("metadata")
 
 	if newLws.Spec.LeaderWorkerTemplate.SubGroupPolicy != nil && oldLws.Spec.LeaderWorkerTemplate.SubGroupPolicy != nil {
 		allErrs = append(allErrs, apivalidation.ValidateImmutableField(*newLws.Spec.LeaderWorkerTemplate.SubGroupPolicy.SubGroupSize, *oldLws.Spec.LeaderWorkerTemplate.SubGroupPolicy.SubGroupSize, field.NewPath("spec", "leaderWorkerTemplate", "SubGroupPolicy", "subGroupSize"))...)
@@ -111,6 +113,7 @@ func (r *LeaderWorkerSetWebhook) ValidateUpdate(ctx context.Context, oldLws, new
 	if newLws.Spec.NetworkConfig != nil && newLws.Spec.NetworkConfig.SubdomainPolicy == nil {
 		allErrs = append(allErrs, field.Invalid(specPath.Child("networkConfig", "subdomainPolicy"), oldLws.Spec.NetworkConfig.SubdomainPolicy, "cannot set subdomainPolicy as null"))
 	}
+	allErrs = append(allErrs, validateGangSchedulerProviderImmutable(metadataPath, oldLws, newLws)...)
 
 	return nil, allErrs.ToAggregate()
 }
@@ -180,6 +183,7 @@ func (r *LeaderWorkerSetWebhook) generalValidate(lws *v1.LeaderWorkerSet) field.
 			allErrs = append(allErrs, field.Invalid(metadataPath.Child("annotations", v1.SubGroupExclusiveKeyAnnotationKey), lws.Annotations[v1.SubGroupExclusiveKeyAnnotationKey], "cannot have subgroup-exclusive-topology without subGroupSize set"))
 		}
 	}
+	allErrs = append(allErrs, validateGangSchedulerProvider(metadataPath, specPath, lws)...)
 
 	return allErrs
 }
@@ -251,6 +255,46 @@ func validateUpdateSubGroupPolicy(specPath *field.Path, lws *v1.LeaderWorkerSet)
 		(*lws.Spec.LeaderWorkerTemplate.SubGroupPolicy.Type == v1.SubGroupPolicyTypeLeaderExcluded) &&
 		((size-1)%subGroupSize != 0) {
 		allErrs = append(allErrs, field.Invalid(specPath.Child("leaderWorkerTemplate", "SubGroupPolicy", "subGroupSize"), lws.Spec.LeaderWorkerTemplate.SubGroupPolicy.SubGroupSize, "size-1 must be divisible by subGroupSize when using LeaderExcluded"))
+	}
+	return allErrs
+}
+
+func validateGangSchedulerProvider(metadataPath, specPath *field.Path, lws *v1.LeaderWorkerSet) field.ErrorList {
+	allErrs := field.ErrorList{}
+	provider, found := lws.Labels[v1.GangSchedulerProviderLabelKey]
+	if found && !schedulerprovider.IsValidPerLWSProvider(provider) {
+		allErrs = append(allErrs, field.NotSupported(metadataPath.Child("labels").Key(v1.GangSchedulerProviderLabelKey), provider, []string{string(schedulerprovider.Koordinator)}))
+	}
+	if found && provider == string(schedulerprovider.Koordinator) && lws.Spec.StartupPolicy == v1.LeaderReadyStartupPolicy {
+		allErrs = append(allErrs, field.Invalid(specPath.Child("startupPolicy"), lws.Spec.StartupPolicy, "cannot use LeaderReady with Koordinator gang scheduling because workers are created only after the leader is ready"))
+	}
+	allErrs = append(allErrs, validateGangSchedulerProviderNotInPodTemplate(specPath, lws)...)
+	return allErrs
+}
+
+func validateGangSchedulerProviderImmutable(metadataPath *field.Path, oldLws, newLws *v1.LeaderWorkerSet) field.ErrorList {
+	oldProvider, oldFound := oldLws.Labels[v1.GangSchedulerProviderLabelKey]
+	newProvider, newFound := newLws.Labels[v1.GangSchedulerProviderLabelKey]
+	if oldFound == newFound && oldProvider == newProvider {
+		return nil
+	}
+	if oldFound && !newFound && !schedulerprovider.IsValidPerLWSProvider(oldProvider) {
+		// Allow cleanup if an invalid historical value ever bypassed admission.
+		// Valid opt-in values remain immutable after creation.
+		return nil
+	}
+	return field.ErrorList{field.Invalid(metadataPath.Child("labels").Key(v1.GangSchedulerProviderLabelKey), newProvider, "field is immutable")}
+}
+
+func validateGangSchedulerProviderNotInPodTemplate(specPath *field.Path, lws *v1.LeaderWorkerSet) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if lws.Spec.LeaderWorkerTemplate.LeaderTemplate != nil {
+		if value, found := lws.Spec.LeaderWorkerTemplate.LeaderTemplate.Labels[v1.GangSchedulerProviderLabelKey]; found {
+			allErrs = append(allErrs, field.Forbidden(specPath.Child("leaderWorkerTemplate", "leaderTemplate", "metadata", "labels").Key(v1.GangSchedulerProviderLabelKey), fmt.Sprintf("reserved label must be set on LeaderWorkerSet metadata.labels only, got %q", value)))
+		}
+	}
+	if value, found := lws.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels[v1.GangSchedulerProviderLabelKey]; found {
+		allErrs = append(allErrs, field.Forbidden(specPath.Child("leaderWorkerTemplate", "workerTemplate", "metadata", "labels").Key(v1.GangSchedulerProviderLabelKey), fmt.Sprintf("reserved label must be set on LeaderWorkerSet metadata.labels only, got %q", value)))
 	}
 	return allErrs
 }

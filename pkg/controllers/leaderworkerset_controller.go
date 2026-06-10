@@ -784,11 +784,13 @@ func constructLeaderStatefulSetApplyConfiguration(lws *leaderworkerset.LeaderWor
 		return nil, err
 	}
 
-	podTemplateApplyConfiguration.WithLabels(map[string]string{
+	podTemplateLabels := map[string]string{
 		leaderworkerset.WorkerIndexLabelKey: "0",
 		leaderworkerset.SetNameLabelKey:     lws.Name,
 		leaderworkerset.RevisionKey:         revisionKey,
-	})
+	}
+	addGangSchedulerProviderPodLabel(podTemplateLabels, lws.Labels)
+	podTemplateApplyConfiguration.WithLabels(podTemplateLabels)
 	podAnnotations := make(map[string]string)
 	podAnnotations[leaderworkerset.SizeAnnotationKey] = strconv.Itoa(int(*lws.Spec.LeaderWorkerTemplate.Size))
 	if lws.Annotations[leaderworkerset.ExclusiveKeyAnnotationKey] != "" {

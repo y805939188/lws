@@ -17,13 +17,19 @@ limitations under the License.
 package webhooks
 
 import (
+	"context"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	leaderworkerset "sigs.k8s.io/lws/api/leaderworkerset/v1"
-
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
+
+	leaderworkerset "sigs.k8s.io/lws/api/leaderworkerset/v1"
+	"sigs.k8s.io/lws/pkg/schedulerprovider"
+	"sigs.k8s.io/lws/test/wrappers"
 )
 
 func TestGenGroupUniqueKey(t *testing.T) {
@@ -302,4 +308,164 @@ func TestGetSubGroupIndex(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPodWebhookDefaultKoordinatorGangScheduling(t *testing.T) {
+	schedulerProvider, err := schedulerprovider.NewSchedulerProvider(schedulerprovider.Koordinator, nil)
+	require.NoError(t, err)
+	volcanoProvider, err := schedulerprovider.NewSchedulerProvider(schedulerprovider.Volcano, nil)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name              string
+		webhook           *PodWebhook
+		pod               *corev1.Pod
+		wantInject        bool
+		wantVolcanoInject bool
+		wantGroupIndex    string
+		wantWorkerIndex   string
+		wantMinAvailable  string
+		wantGangNameInput koordinatorGangNameInput
+	}{
+		{
+			name:    "global koordinator provider with opt-in leader pod",
+			webhook: NewPodWebhook(schedulerProvider),
+			pod:     koordinatorWebhookLeaderPod(true),
+			wantGangNameInput: koordinatorGangNameInput{
+				namespace:  "default",
+				lwsName:    "test-lws",
+				groupIndex: "0",
+				revision:   "abc123",
+			},
+			wantGroupIndex:   "0",
+			wantWorkerIndex:  "0",
+			wantMinAvailable: "4",
+			wantInject:       true,
+		},
+		{
+			name:    "global koordinator provider with opt-in worker pod",
+			webhook: NewPodWebhook(schedulerProvider),
+			pod:     koordinatorWebhookWorkerPod(true),
+			wantGangNameInput: koordinatorGangNameInput{
+				namespace:  "default",
+				lwsName:    "test-lws",
+				groupIndex: "0",
+				revision:   "abc123",
+			},
+			wantGroupIndex:   "0",
+			wantWorkerIndex:  "1",
+			wantMinAvailable: "4",
+			wantInject:       true,
+		},
+		{
+			name:             "global koordinator provider without opt-in",
+			webhook:          NewPodWebhook(schedulerProvider),
+			pod:              koordinatorWebhookLeaderPod(false),
+			wantGroupIndex:   "0",
+			wantWorkerIndex:  "0",
+			wantMinAvailable: "4",
+		},
+		{
+			name:             "opt-in without global scheduler provider",
+			webhook:          NewPodWebhook(nil),
+			pod:              koordinatorWebhookLeaderPod(true),
+			wantGroupIndex:   "0",
+			wantWorkerIndex:  "0",
+			wantMinAvailable: "4",
+		},
+		{
+			name:              "global volcano provider ignores koordinator opt-in label",
+			webhook:           NewPodWebhook(volcanoProvider),
+			pod:               koordinatorWebhookLeaderPod(true),
+			wantGroupIndex:    "0",
+			wantWorkerIndex:   "0",
+			wantMinAvailable:  "4",
+			wantVolcanoInject: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoError(t, tt.webhook.Default(context.Background(), tt.pod))
+
+			assert.Equal(t, tt.wantGroupIndex, tt.pod.Labels[leaderworkerset.GroupIndexLabelKey])
+			assert.Equal(t, tt.wantWorkerIndex, tt.pod.Labels[leaderworkerset.WorkerIndexLabelKey])
+
+			gangName, foundName := tt.pod.Labels[schedulerprovider.ACKPodGroupNameLabelKey]
+			minAvailable, foundMinAvailable := tt.pod.Labels[schedulerprovider.ACKPodGroupMinAvailableLabelKey]
+			if !tt.wantInject {
+				assert.False(t, foundName)
+				assert.False(t, foundMinAvailable)
+				if tt.wantVolcanoInject {
+					assert.Equal(t, schedulerprovider.GetPodGroupName("test-lws", "0", "abc123"), tt.pod.Annotations[volcanov1beta1.KubeGroupNameAnnotationKey])
+				} else {
+					assert.NotContains(t, tt.pod.Annotations, volcanov1beta1.KubeGroupNameAnnotationKey)
+				}
+				return
+			}
+
+			assert.True(t, foundName)
+			assert.True(t, foundMinAvailable)
+			assert.NotContains(t, tt.pod.Annotations, volcanov1beta1.KubeGroupNameAnnotationKey)
+			assert.Equal(t, schedulerprovider.GetKoordinatorGangName(
+				tt.wantGangNameInput.namespace,
+				tt.wantGangNameInput.lwsName,
+				tt.wantGangNameInput.groupIndex,
+				tt.wantGangNameInput.revision,
+			), gangName)
+			assert.Equal(t, tt.wantMinAvailable, minAvailable)
+		})
+	}
+}
+
+type koordinatorGangNameInput struct {
+	namespace  string
+	lwsName    string
+	groupIndex string
+	revision   string
+}
+
+func koordinatorWebhookLeaderPod(optIn bool) *corev1.Pod {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-lws-0",
+			Namespace: "default",
+			Labels: map[string]string{
+				leaderworkerset.SetNameLabelKey:     "test-lws",
+				leaderworkerset.WorkerIndexLabelKey: "0",
+				leaderworkerset.RevisionKey:         "abc123",
+			},
+			Annotations: map[string]string{
+				leaderworkerset.SizeAnnotationKey: "4",
+			},
+		},
+		Spec: wrappers.MakeLeaderPodSpec(),
+	}
+	if optIn {
+		pod.Labels[leaderworkerset.GangSchedulerProviderLabelKey] = string(schedulerprovider.Koordinator)
+	}
+	return pod
+}
+
+func koordinatorWebhookWorkerPod(optIn bool) *corev1.Pod {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-lws-0-1",
+			Namespace: "default",
+			Labels: map[string]string{
+				leaderworkerset.SetNameLabelKey:    "test-lws",
+				leaderworkerset.GroupIndexLabelKey: "0",
+				leaderworkerset.RevisionKey:        "abc123",
+			},
+			Annotations: map[string]string{
+				leaderworkerset.SizeAnnotationKey:          "4",
+				leaderworkerset.LeaderPodNameAnnotationKey: "test-lws-0",
+			},
+		},
+		Spec: wrappers.MakeWorkerPodSpec(),
+	}
+	if optIn {
+		pod.Labels[leaderworkerset.GangSchedulerProviderLabelKey] = string(schedulerprovider.Koordinator)
+	}
+	return pod
 }

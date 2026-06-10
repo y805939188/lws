@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	leaderworkerset "sigs.k8s.io/lws/api/leaderworkerset/v1"
+	"sigs.k8s.io/lws/pkg/schedulerprovider"
 	revisionutils "sigs.k8s.io/lws/pkg/utils/revision"
 	"sigs.k8s.io/lws/test/wrappers"
 )
@@ -419,6 +420,74 @@ func TestConstructWorkerStatefulSetApplyConfiguration(t *testing.T) {
 			}
 			if diff := cmp.Diff(tc.wantStatefulSetConfig, statefulSetConfig); diff != "" {
 				t.Errorf("unexpected StatefulSet apply operation %s", diff)
+			}
+		})
+	}
+}
+
+func TestWorkerStatefulSetApplyConfigPropagatesGangSchedulerProviderLabel(t *testing.T) {
+	tests := []struct {
+		name              string
+		labels            map[string]string
+		wantPodLabel      string
+		wantPodLabelFound bool
+	}{
+		{
+			name: "no opt-in",
+		},
+		{
+			name: "unsupported provider value",
+			labels: map[string]string{
+				leaderworkerset.GangSchedulerProviderLabelKey: "volcano",
+			},
+		},
+		{
+			name: "koordinator opt-in",
+			labels: map[string]string{
+				leaderworkerset.GangSchedulerProviderLabelKey: string(schedulerprovider.Koordinator),
+			},
+			wantPodLabel:      string(schedulerprovider.Koordinator),
+			wantPodLabelFound: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fake.NewClientBuilder().Build()
+			lws := wrappers.BuildLeaderWorkerSet("default").Labels(tt.labels).Obj()
+			revision, err := revisionutils.NewRevision(context.TODO(), client, lws, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			revisionKey := revisionutils.GetRevisionKey(revision)
+			leaderPod := corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sample",
+					Namespace: "default",
+					Labels: map[string]string{
+						leaderworkerset.WorkerIndexLabelKey:     "0",
+						leaderworkerset.SetNameLabelKey:         "test-sample",
+						leaderworkerset.GroupIndexLabelKey:      "0",
+						leaderworkerset.GroupUniqueHashLabelKey: "test-key",
+						leaderworkerset.RevisionKey:             revisionKey,
+					},
+				},
+			}
+
+			stsApplyConfig, err := constructWorkerStatefulSetApplyConfiguration(leaderPod, *lws, revision)
+			if err != nil {
+				t.Fatalf("constructWorkerStatefulSetApplyConfiguration() error = %v", err)
+			}
+
+			got, found := stsApplyConfig.Spec.Template.Labels[leaderworkerset.GangSchedulerProviderLabelKey]
+			if found != tt.wantPodLabelFound || got != tt.wantPodLabel {
+				t.Fatalf("worker pod template gang scheduler provider label = %q, found %t, want %q, found %t", got, found, tt.wantPodLabel, tt.wantPodLabelFound)
+			}
+			if _, found := stsApplyConfig.Spec.Selector.MatchLabels[leaderworkerset.GangSchedulerProviderLabelKey]; found {
+				t.Fatalf("worker StatefulSet selector must not include %s", leaderworkerset.GangSchedulerProviderLabelKey)
+			}
+			if _, found := stsApplyConfig.Labels[leaderworkerset.GangSchedulerProviderLabelKey]; found {
+				t.Fatalf("worker StatefulSet metadata labels must not include %s", leaderworkerset.GangSchedulerProviderLabelKey)
 			}
 		})
 	}

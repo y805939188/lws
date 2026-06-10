@@ -38,6 +38,7 @@ import (
 	leaderworkerset "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/lws/pkg/schedulerprovider"
 	revisionutils "sigs.k8s.io/lws/pkg/utils/revision"
 	"sigs.k8s.io/lws/test/wrappers"
 )
@@ -752,6 +753,61 @@ func TestLeaderStatefulSetApplyConfig(t *testing.T) {
 			}
 			if diff := cmp.Diff(tc.wantApplyConfig, stsApplyConfig); diff != "" {
 				t.Errorf("unexpected StatefulSet apply configuration: %s", diff)
+			}
+		})
+	}
+}
+
+func TestLeaderStatefulSetApplyConfigPropagatesGangSchedulerProviderLabel(t *testing.T) {
+	tests := []struct {
+		name              string
+		labels            map[string]string
+		wantPodLabel      string
+		wantPodLabelFound bool
+	}{
+		{
+			name: "no opt-in",
+		},
+		{
+			name: "unsupported provider value",
+			labels: map[string]string{
+				leaderworkerset.GangSchedulerProviderLabelKey: "volcano",
+			},
+		},
+		{
+			name: "koordinator opt-in",
+			labels: map[string]string{
+				leaderworkerset.GangSchedulerProviderLabelKey: string(schedulerprovider.Koordinator),
+			},
+			wantPodLabel:      string(schedulerprovider.Koordinator),
+			wantPodLabelFound: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fake.NewClientBuilder().Build()
+			lws := wrappers.BuildLeaderWorkerSet("default").Labels(tt.labels).Obj()
+			revision, err := revisionutils.NewRevision(context.TODO(), client, lws, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			revisionKey := revisionutils.GetRevisionKey(revision)
+
+			stsApplyConfig, err := constructLeaderStatefulSetApplyConfiguration(lws, 0, *lws.Spec.Replicas, revisionKey)
+			if err != nil {
+				t.Fatalf("constructLeaderStatefulSetApplyConfiguration() error = %v", err)
+			}
+
+			got, found := stsApplyConfig.Spec.Template.Labels[leaderworkerset.GangSchedulerProviderLabelKey]
+			if found != tt.wantPodLabelFound || got != tt.wantPodLabel {
+				t.Fatalf("leader pod template gang scheduler provider label = %q, found %t, want %q, found %t", got, found, tt.wantPodLabel, tt.wantPodLabelFound)
+			}
+			if _, found := stsApplyConfig.Spec.Selector.MatchLabels[leaderworkerset.GangSchedulerProviderLabelKey]; found {
+				t.Fatalf("leader StatefulSet selector must not include %s", leaderworkerset.GangSchedulerProviderLabelKey)
+			}
+			if _, found := stsApplyConfig.Labels[leaderworkerset.GangSchedulerProviderLabelKey]; found {
+				t.Fatalf("leader StatefulSet metadata labels must not include %s", leaderworkerset.GangSchedulerProviderLabelKey)
 			}
 		})
 	}

@@ -25,6 +25,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	configapi "sigs.k8s.io/lws/api/config/v1alpha1"
+	"sigs.k8s.io/lws/pkg/schedulerprovider"
 )
 
 func TestValidate(t *testing.T) {
@@ -101,10 +102,17 @@ func TestValidate(t *testing.T) {
 				},
 			},
 		},
-		"supported schedulerProvider": {
+		"supported volcano schedulerProvider": {
 			cfg: &configapi.Configuration{
 				GangSchedulingManagement: &configapi.GangSchedulingManagement{
-					SchedulerProvider: ptr.To("volcano"),
+					SchedulerProvider: ptr.To(string(schedulerprovider.Volcano)),
+				},
+			},
+		},
+		"supported koordinator schedulerProvider": {
+			cfg: &configapi.Configuration{
+				GangSchedulingManagement: &configapi.GangSchedulingManagement{
+					SchedulerProvider: ptr.To(string(schedulerprovider.Koordinator)),
 				},
 			},
 		},

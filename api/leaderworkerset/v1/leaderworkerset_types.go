@@ -98,6 +98,14 @@ const (
 	RecreateGroupAfterStartAnnotationKey string = "leaderworkerset.sigs.k8s.io/experimental-recreate-group-after-start"
 )
 
+const (
+	// GangSchedulerProviderLabelKey is a fork-private opt-in label for selecting
+	// a gang scheduling provider. The only supported value is "koordinator".
+	// This label is immutable after creation and must only be set on
+	// LeaderWorkerSet metadata.labels, not on leader or worker pod templates.
+	GangSchedulerProviderLabelKey string = "lws.moonshot.io/gang-scheduler-provider"
+)
+
 // One group consists of a single leader and M workers, and the total number of pods in a group is M+1.
 // LeaderWorkerSet will create N replicas of leader-worker pod groups (hereinafter referred to as group).
 //
